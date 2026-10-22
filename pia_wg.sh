@@ -467,12 +467,16 @@ watchdog_lastrun() {
 }
 
 watchdog_install() {
-  watchdog_installed && return
-  {
-    crontab -l
-    echo "* * * * * /bin/sh $SCRIPTPATH start # pia_wg watchdog"
-  } | crontab -
-  echo "[$(date)] Watchdog installed" >>"$PIALOG"
+  watchdog_installed || {
+    {
+      crontab -l 2>/dev/null
+      echo "* * * * * /bin/sh $SCRIPTPATH start # pia_wg watchdog"
+    } | crontab -
+    echo "[$(date)] Watchdog installed" >>"$PIALOG"
+  }
+  # cron is not started at boot when there was no crontab
+  /etc/init.d/cron enable
+  /etc/init.d/cron start
 }
 
 watchdog_remove() {
