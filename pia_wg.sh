@@ -19,6 +19,7 @@ SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 LOGDEFPATH='/var/log'
 LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
+PIALOCK='/var/lock/pia_wg.lock'
 PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
 CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
@@ -561,11 +562,25 @@ if [ "$AUTO" ]; then
   trap "_exit" 1 2 3 6 EXIT
   [ -f "$PIALOG" ] && touch "$PIALOG" || echo "[$(date)] Log created" >"$PIALOG"
   mkfifo "$FIFO"
-  awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' "$FIFO" >&2 &
-  exec 3<>"$FIFO"
+  # Open both ends before forking awk so messages from a quick exit are not lost
+  # shellcheck disable=SC2094  # Both ends of the FIFO are opened on purpose
+  exec 3<>"$FIFO" 4<"$FIFO"
+  awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' <&4 3>&- 4<&- >&2 &
+  exec 4<&-
 else
   exec 3>&2
 fi
+
+# The watchdog runs every minute; only one instance may change the PIA interface at a time
+case "$1" in
+'start' | 'restart' | 'stop' | 'init-network')
+  exec 9>"$PIALOCK"
+  flock -n 9 || {
+    echo "Another instance is already running; exiting!" >&3
+    exit 1
+  }
+  ;;
+esac
 
 case "$1" in
 'configure') case "$2" in
