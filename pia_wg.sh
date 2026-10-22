@@ -413,8 +413,16 @@ EOI
 }
 
 start_wgpia() {
+  # Stop first so the PIA API calls do not go through a broken tunnel
   stop_wgpia
-  set_netconf
+  # set_netconf exits on error; bring the previous config back up if it fails
+  (set_netconf) || {
+    uci -q get network.$PIAWG_IF >/dev/null && {
+      echo "Restoring previous PIA config" >&3
+      ifup $PIAWG_IF
+    }
+    return 1
+  }
   echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
   ifup $PIAWG_IF
   sleep 1
@@ -452,8 +460,9 @@ check_wg() {
     echo "Access to PIA Endpoint through WAN: NOK!" >&3
     return 1
   else
-    echo "Connectivity through PIA: NOK" >&3
-    return 1
+    # Restarting PIA cannot help while the WAN is down
+    echo "Connectivity through WAN: NOK!" >&3
+    return 2
   fi
 }
 
@@ -619,7 +628,7 @@ case "$1" in
   case $? in
   0) echo "PIA is already up!" ;;
   1) start_wgpia ;;
-  2) echo "Could not start PIA!" >&2 ;;
+  2) echo "WAN is down; not restarting PIA" >&3 ;;
   esac
   R=$?
   [ $R -eq 0 ] && [ "$2" = "--watchdog" ] && watchdog_install
