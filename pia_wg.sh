@@ -39,6 +39,11 @@ read_yn() {
   esac
 }
 
+# Escape \ and " so uci batch stores the value as typed
+uci_escape() {
+  printf '%s' "$1" | sed 's/[\\"]/\\&/g'
+}
+
 set_logpath() {
   if [ "$1" ]; then
     LOGPATH="$1"
@@ -79,7 +84,7 @@ select_region() {
     if [ -z "$PIAREGIONID" ]; then
       break
     else
-      PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .name")"
+      PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r --arg id "$PIAREGIONID" '.[] | select(.id==$id) | .name')"
       if [ -z "$PIAREGIONNAME" ]; then
         echo "Invalid region ID: '$PIAREGIONID'"
       else
@@ -93,12 +98,18 @@ select_region() {
     read_yn "Port forward only servers" && PIASERVPF='| select(.port_forward==true) ' || PIASERVPF=''
     read_yn "Geo only servers" && PIASERVGEO='| select(.geo==true) ' || PIASERVGEO=''
     echo "$PIAREGIONS" | jq -r ".[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO | .name" | nl -v0
-    printf "Select your region number: "
-    read -r AND
-    PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO ][$AND].id")"
+    while
+      printf "Select your region number: "
+      read -r AND
+      case "$AND" in
+      '' | *[!0-9]*) PIAREGIONID='' ;;
+      *) PIAREGIONID="$(echo "$PIAREGIONS" | jq -r --arg n "$AND" "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO ][\$n | tonumber] | .id // empty")" ;;
+      esac
+      [ -z "$PIAREGIONID" ]
+    do echo "Invalid region number: '$AND'"; done
   fi
-  PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .name")"
-  PIAREGIONDNS="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .dns")"
+  PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r --arg id "$PIAREGIONID" '.[] | select(.id==$id) | .name')"
+  PIAREGIONDNS="$(echo "$PIAREGIONS" | jq -r --arg id "$PIAREGIONID" '.[] | select(.id==$id) | .dns')"
   echo "Region selected: $PIAREGIONNAME"
   uci -q batch <<EOI >/dev/null
     delete pia_wg.@region[0]
@@ -115,14 +126,14 @@ set_piauser() {
   read -r PIAUSER
   printf "PIA password: "
   stty -echo
-  read -r PIAPASS
+  IFS= read -r PIAPASS
   stty echo
   printf "\n"
   uci -q batch <<EOI >/dev/null
     delete pia_wg.@user[0]
     add pia_wg user
-    set pia_wg.@user[0].id="$PIAUSER"
-    set pia_wg.@user[0].password="$PIAPASS"
+    set pia_wg.@user[0].id="$(uci_escape "$PIAUSER")"
+    set pia_wg.@user[0].password="$(uci_escape "$PIAPASS")"
     commit pia_wg.@user[0]
 EOI
 }
@@ -169,8 +180,8 @@ set_dip() {
       uci -q commit pia_wg
       return
     }
-    [ ${#DIPTOK} -eq 32 ] && [ "$(printf '%.3s' "$DIPTOK")" = "DIP" ] && break
-    echo "Token starts with DIP and is 32 characters long!"
+    [ ${#DIPTOK} -eq 32 ] && [ "$(printf '%.3s' "$DIPTOK")" = "DIP" ] && case "$DIPTOK" in *[!A-Za-z0-9]*) false ;; esac && break
+    echo "Token starts with DIP and is 32 letters or digits long!"
   done
   uci -q batch <<EOI >/dev/null
     delete pia_wg.@dip[0]
