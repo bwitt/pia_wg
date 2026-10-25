@@ -19,6 +19,7 @@ SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 LOGDEFPATH='/var/log'
 LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
+PIALOCK='/var/lock/pia_wg.lock'
 PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
 CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
@@ -583,7 +584,8 @@ pf_refresh() {
   [ $((NOW - $(pf_get scriptfailed 0))) -ge "$PFBIND" ] || return 1
   echo "Port forwarding: port $PORT" >&3
   SCRIPT="$(uci -q get pia_wg.@portforward[0].script)"
-  if [ -z "$SCRIPT" ] || "$SCRIPT" "$PORT"; then
+  # Background children must not inherit the lock
+  if [ -z "$SCRIPT" ] || "$SCRIPT" "$PORT" 9>&-; then
     pf_put applied "$PORT"
   else
     pf_put scriptfailed "$NOW"
@@ -827,6 +829,18 @@ chmod 600 "$PIACONF"
 PIALOG="$(logfile)"
 [ -t 0 ] && unset AUTO || AUTO=1
 
+# One run at a time; the kernel releases a flock even if the run is killed.
+# Taken before the logger starts: an instant exit could leave it blocked opening the FIFO
+case "$1" in
+'start' | 'restart' | 'stop' | 'init-network')
+  exec 9>"$PIALOCK"
+  flock -n 9 || {
+    echo "Another instance is running; exiting" >&2
+    exit 1
+  }
+  ;;
+esac
+
 # Logging (only if not in interactive mode)
 if [ "$AUTO" ]; then
   FIFO="$(mktemp -u /tmp/pia_wg.XXXXXXXXXX)"
@@ -845,7 +859,8 @@ if [ "$AUTO" ]; then
   # Anything written to fd 3 is notable (error or corrective action): log it, and queue it for notification if a webhook is set
   NF="$(uci -q get pia_wg.@notify[0].webhook >/dev/null && echo "$NOTIFYPENDING")"
   [ -f "$NOTIFYPENDING" ] && NOTIFYSIZE="$(($(wc -c <"$NOTIFYPENDING")))" || NOTIFYSIZE=0
-  awk -v lf="$PIALOG" -v nf="$NF" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf; if(nf){printf("[%s] %s\n",date,$0) >> nf}}' "$FIFO" >&2 &
+  # The logger must not hold the lock (fd 9)
+  awk -v lf="$PIALOG" -v nf="$NF" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf; if(nf){printf("[%s] %s\n",date,$0) >> nf}}' "$FIFO" >&2 9>&- &
   LOGGERPID=$!
   exec 3<>"$FIFO"
 else

@@ -66,6 +66,7 @@ Then, next time you use `./pia_wg.sh start` (if not already started, otherwise y
 The script can install a watchdog that will check regularly the status and restart the VPN if needed.
 <br/> For that, just use `--watchdog` when using `start`or `restart`, or run the command `./pia_wg.sh watchdog install`
 <br/> To unsinstall/remove the watchdog, use `./pia_wg.sh watchdog remove`; when `./pia_wg.sh stop` is used, the watchdog is automatically removed
+<br/> Only one `start`, `restart`, `stop` or `init-network` runs at a time: a run started while another is busy exits right away.
 
 ## Logging
 When the watchdog is enabled, the scripts log is located in `/var/log/pia_wg_watchdog.log`
