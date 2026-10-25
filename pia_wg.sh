@@ -542,6 +542,25 @@ pf_api() {
     --connect-to "$PFHOST::$(uci -q get pia_wg.@portforward[0].gateway):" "https://$PFHOST:19999/$1"
 }
 
+pf_new_port() {
+  # The token lasts a day, a port two months; subshell since renew_piatoken exits on failure
+  if ! (ensure_piatoken); then
+    echo "Port forwarding: could not renew the PIA token to get a port" >&3
+    return 1
+  fi
+  R="$(printf 'data-urlencode = %s\n' "$(curlcfg_quote "token=$(uci -q get pia_wg.@token[0].hash)")" | pf_api getSignature)"
+  if [ "$(echo "$R" | jq -r '.status' 2>/dev/null)" != "OK" ]; then
+    echo "Port forwarding: PIA did not give a port (does the region support port forwarding?)" >&3
+    return 1
+  fi
+  PAYLOAD="$(echo "$R" | jq -r '.payload')"
+  pf_put payload "$PAYLOAD"
+  pf_put signature "$(echo "$R" | jq -r '.signature')"
+  pf_put port "$(printf '%s' "$PAYLOAD" | jq -rR '@base64d | fromjson | .port')"
+  pf_put expires "$(printf '%s' "$PAYLOAD" | jq -rR '@base64d | fromjson | (.expires_at | split(".")[0] | rtrimstr("Z")) + "Z" | fromdateiso8601' 2>/dev/null || echo $((NOW + 604800)))"
+  pf_put bound 0
+}
+
 # Keeps the PIA forwarded port: gets a port when needed, binds it every PFBIND seconds,
 # and runs the configured script when the port changes
 pf_refresh() {
@@ -551,19 +570,13 @@ pf_refresh() {
   NOW="$(date +%s)"
   # A new port when there is none or it expires within a day; after a failure, retry every PFBIND seconds
   if [ -z "$(pf_get signature)" ] || [ "$(pf_get expires 0)" -lt $((NOW + 86400)) ]; then
-    [ $((NOW - $(pf_get failed 0))) -ge "$PFBIND" ] || return 1
-    R="$(printf 'data-urlencode = %s\n' "$(curlcfg_quote "token=$(uci -q get pia_wg.@token[0].hash)")" | pf_api getSignature)"
-    if [ "$(echo "$R" | jq -r '.status' 2>/dev/null)" != "OK" ]; then
+    if [ $((NOW - $(pf_get failed 0))) -ge "$PFBIND" ] && ! pf_new_port; then
       pf_put failed "$NOW"
-      echo "Port forwarding: PIA did not give a port (does the region support port forwarding?)" >&3
+    fi
+    # Keep binding a still-valid port if renewal failed
+    if [ -z "$(pf_get signature)" ] || [ "$(pf_get expires 0)" -le "$NOW" ]; then
       return 1
     fi
-    PAYLOAD="$(echo "$R" | jq -r '.payload')"
-    pf_put payload "$PAYLOAD"
-    pf_put signature "$(echo "$R" | jq -r '.signature')"
-    pf_put port "$(printf '%s' "$PAYLOAD" | jq -rR '@base64d | fromjson | .port')"
-    pf_put expires "$(printf '%s' "$PAYLOAD" | jq -rR '@base64d | fromjson | (.expires_at | split(".")[0] | rtrimstr("Z")) + "Z" | fromdateiso8601' 2>/dev/null || echo $((NOW + 604800)))"
-    pf_put bound 0
   fi
   # Keepalive
   if [ $((NOW - $(pf_get bound 0))) -ge "$PFBIND" ]; then
