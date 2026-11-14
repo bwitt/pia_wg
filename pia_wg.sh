@@ -697,10 +697,12 @@ set_netconf() {
   WGSERVKEY="$(echo "$PIAADDKEY" | jq -r '.server_key')"
   WGDNS="$(echo "$PIAADDKEY" | jq -r '.dns_servers[]?')"
   WGPEERIP="$(echo "$PIAADDKEY" | jq -r '.peer_ip')"
+  [ -z "$DIP_STATUS" ] && WGSRVNAME="$WGSRV_CN" || WGSRVNAME="$(uci -q get pia_wg.@dip[0].cn)"
+  echo "Using PIA server $WGSRVNAME ($WGSERVIP:$WGSERVPT), tunnel IP $WGPEERIP" >&3
 
   if pf_enabled; then
     # Port forwarding goes through the server that accepted the key; a new connection needs a new port
-    [ -z "$DIP_STATUS" ] && PFHOST="$WGSRV_CN" || PFHOST="$(uci -q get pia_wg.@dip[0].cn)"
+    PFHOST="$WGSRVNAME"
     rm -f "$PFDIR"/*
     uci -q batch <<EOI >/dev/null
     set pia_wg.@portforward[0].host="$PFHOST"
@@ -745,7 +747,14 @@ start_wgpia() {
   set_netconf
   echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
   ifup $PIAWG_IF
+  # Give the first handshake (started by the persistent keepalive) time, so a slow one is not taken for a dead tunnel
   sleep 1
+  WAIT=1
+  while [ "$(wg_handshake)" -eq 0 ] && [ $WAIT -lt 10 ]; do
+    sleep 1
+    WAIT=$((WAIT + 1))
+  done
+  [ "$(wg_handshake)" -gt 0 ] && [ $WAIT -gt 1 ] && echo "WireGuard handshake with PIA took ${WAIT}s" >&3
   check_wg
   RET=$?
   if [ $RET -eq 0 ]; then
@@ -789,16 +798,35 @@ check_wg() {
   echo "Region is: $(uci get network.$PIAWG_PEER.description)"
   if ping -q -c3 -W2 -n -I "$PIAWG_IF" 1.1.1.1 >/dev/null; then
     echo "Connectivity through PIA: OK"
-  elif ping -q -c1 -w1 -n -I "$WAN_IF" "$PIAWG_EP" >/dev/null; then
+    return 0
+  fi
+  if ping -q -c1 -w1 -n -I "$WAN_IF" "$PIAWG_EP" >/dev/null; then
     echo "Connectivity through PIA: NOK" >&3
-    return 1
   elif ping -q -c1 -w1 -n -I "$WAN_IF" 1.1.1.1 >/dev/null; then
     echo "Access to PIA Endpoint through WAN: NOK!" >&3
-    return 1
   else
-    echo "Connectivity through PIA: NOK" >&3
-    return 1
+    echo "Connectivity through PIA: NOK (no connectivity through WAN either)" >&3
   fi
+  wg_diag
+  return 1
+}
+
+# Epoch of the last handshake with PIA, 0 if none yet
+wg_handshake() {
+  DIAGHS="$(wg show "$PIAWG_IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
+  echo "${DIAGHS:-0}"
+}
+
+# Why the tunnel check failed: handshake age, traffic counters, and which targets answer through the tunnel
+wg_diag() {
+  DIAGHS="$(wg_handshake)"
+  [ "$DIAGHS" -gt 0 ] && DIAGHS="$(($(date +%s) - DIAGHS))s ago" || DIAGHS='never'
+  DIAGXFER="$(wg show "$PIAWG_IF" transfer 2>/dev/null | awk '{print "rx " $2 " B, tx " $3 " B"; exit}')"
+  DIAGPINGS=''
+  for T in $(uci -q get network.$PIAWG_IF.dns) 1.1.1.1 8.8.8.8; do
+    ping -q -c1 -W2 -n -I "$PIAWG_IF" "$T" >/dev/null 2>&1 && DIAGPINGS="$DIAGPINGS $T ok," || DIAGPINGS="$DIAGPINGS $T NOK,"
+  done
+  echo "Debug: endpoint $PIAWG_EP via ${WAN_IF:-?}, last handshake $DIAGHS, ${DIAGXFER:-no transfer data}; ping through PIA:${DIAGPINGS%,}" >&3
 }
 
 # Only one run at a time, so a long restart is not cut short by the next watchdog run;
